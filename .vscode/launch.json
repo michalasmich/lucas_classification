@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Train Orthophoto 384m",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/main.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "python": "C:\\Users\\mixalis\\miniconda3\\envs\\lucasml\\python.exe",
+      "args": [
+        "--mode",
+        "train",
+        "--image_dir",
+        "F:\\mixalis_projects\\lucas\\all_orthos_jpg",
+        "--imagery_type",
+        "orthophoto",
+        "--batch_size",
+        "12",
+        "--lr",
+        "1e-4",
+        "--warmup_epochs",
+        "0",
+        "--max_epochs",
+        "1",
+        "--patch_meters",
+        "384"
+      ],
+      "justMyCode": true
+    }
+  ]
+}

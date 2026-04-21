@@ -1,0 +1,7 @@
+# Ignore generated artifacts directories
+plots/
+source_id_lists/
+logs/
+__pycache__/
+*.pyc
+LUCAS-Master_2025_v6.csv
