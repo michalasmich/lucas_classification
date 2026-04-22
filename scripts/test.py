@@ -25,6 +25,7 @@ CLASS_DESCRIPTIONS = {
 
 def _build_dataset_kwargs(args, transform=None):
     kwargs = {
+        "embeddings_path": args.embeddings_path,
         "patch_meters": args.patch_meters,
         "crop_mode": args.crop_mode,
         "filter_points": getattr(args, "filter_points", False),
@@ -96,6 +97,7 @@ def load_experiment_config(experiment_dir):
         "data": {
             "image_dir": legacy.get("image_dir"),
             "csv_path": legacy.get("csv_path"),
+            "embeddings_path": legacy.get("embeddings_path"),
             "imagery_type": legacy.get("imagery_type", "auto"),
             "patch_meters": _as_int(legacy.get("patch_meters"), 384),
             "crop_mode": legacy.get("crop_mode", "center_crop"),
@@ -129,6 +131,9 @@ def resolve_test_preprocessing(args):
 
     args.image_dir = args.image_dir or config_data.get("image_dir")
     args.csv_path = args.csv_path or config_data.get("csv_path")
+    args.embeddings_path = args.embeddings_path or config_data.get("embeddings_path")
+    if not args.embeddings_path:
+        raise ValueError("AEF evaluation requires --embeddings_path or a saved embeddings_path in config.json.")
     args.patch_meters = int(config_data.get("patch_meters", args.patch_meters))
     args.crop_mode = config_data.get("crop_mode", args.crop_mode)
     args.filter_points = bool(config_data.get("filter_points", getattr(args, "filter_points", False)))
@@ -168,10 +173,16 @@ def load_checkpoint(model, checkpoint_path):
     print(f"Loading checkpoint from: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     if "state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["state_dict"])
+        missing_keys, unexpected_keys = model.load_state_dict(checkpoint["state_dict"], strict=False)
         print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
     else:
-        model.load_state_dict(checkpoint)
+        missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
+    if missing_keys or unexpected_keys:
+        print("Checkpoint loaded with non-strict matching.")
+        if missing_keys:
+            print(f"  Missing keys: {missing_keys}")
+        if unexpected_keys:
+            print(f"  Unexpected keys: {unexpected_keys}")
     return model
 
 
@@ -286,8 +297,11 @@ def run_inference(model, test_loader, dataset, test_indices):
         for batch_idx, batch in enumerate(tqdm(test_loader, desc="Running inference")):
             images = batch["image"].to(device)
             labels = batch["label"].to(device)
+            embeddings = batch.get("embedding")
+            if embeddings is not None:
+                embeddings = embeddings.to(device)
 
-            outputs = model(images)
+            outputs = model(images, embeddings=embeddings)
             probs = torch.softmax(outputs, dim=1)
             preds = torch.argmax(probs, dim=1)
 
@@ -448,6 +462,8 @@ if __name__ == "__main__":
                         help="Path to image directory")  
     parser.add_argument("--csv_path", type=str, required=True,
                         help="Path to labels CSV file")
+    parser.add_argument("--embeddings_path", type=str, default=None,
+                        help="Path to AEF embeddings HDF5 file")
     parser.add_argument("--batch_size", type=int, default=32,
                         help="Batch size for testing")
     parser.add_argument("--num_workers", type=int, default=2,

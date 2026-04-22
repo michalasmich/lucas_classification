@@ -20,19 +20,27 @@ def _resolve_default_csv_path():
     return candidates[0]
 
 
+def _resolve_default_embeddings_path():
+    repo_root = Path(__file__).resolve().parent.parent
+    return repo_root / "aef" / "embeddings.h5"
+
+
 DEFAULT_CSV_PATH = _resolve_default_csv_path()
+DEFAULT_EMBEDDINGS_PATH = _resolve_default_embeddings_path()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Lightning Land Cover Classification")
     parser.add_argument("--mode", choices=["train", "test"], required=True, help="Training or testing mode")
     parser.add_argument("--csv_path", default=str(DEFAULT_CSV_PATH), help="Path to CSV file")
     parser.add_argument("--image_dir", required=True, help="Path to folder with images")
+    parser.add_argument("--embeddings_path", default=str(DEFAULT_EMBEDDINGS_PATH), help="Path to AEF embeddings HDF5 file")
     parser.add_argument("--checkpoint_path", help="Path to model checkpoint (required for test mode)")
     parser.add_argument("--max_epochs", type=int, default=10, help="Maximum training epochs")
     parser.add_argument("--warmup_epochs", type=int, default=2, help="Number of warmup epochs for learning rate scheduling")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers (set 0 on low-RAM systems)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--freeze_resnet", action="store_true", help="Freeze resnet during training and only train aef head")
     parser.add_argument("--patch_meters", type=int, default=384, help="Center patch size in meters")
     parser.add_argument("--imagery_type", choices=["auto", "orthophoto", "vhr"], default="auto",
                         help="Image-source preprocessing preset. Use 'orthophoto' or 'vhr' for explicit control.")

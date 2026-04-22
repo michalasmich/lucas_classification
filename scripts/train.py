@@ -75,6 +75,7 @@ def _save_experiment_config(
         "data": {
             "image_dir": str(args.image_dir),
             "csv_path": str(args.csv_path),
+            "embeddings_path": str(args.embeddings_path),
             "imagery_type": str(args.imagery_type),
             "patch_meters": int(args.patch_meters),
             "crop_mode": str(args.crop_mode),
@@ -110,6 +111,7 @@ def _resolve_trainer_precision():
 
 def _build_dataset_kwargs(args, transform=None):
     kwargs = {
+        "embeddings_path": args.embeddings_path,
         "patch_meters": args.patch_meters,
         "crop_mode": args.crop_mode,
         "filter_points": getattr(args, "filter_points", False),
@@ -173,7 +175,13 @@ def _create_loggers(args):
 def _load_checkpoint_state(model, checkpoint_path):
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     state_dict = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
-    model.load_state_dict(state_dict)
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    if missing_keys or unexpected_keys:
+        print(f"Checkpoint loaded with non-strict matching from: {checkpoint_path}")
+        if missing_keys:
+            print(f"  Missing keys: {missing_keys}")
+        if unexpected_keys:
+            print(f"  Unexpected keys: {unexpected_keys}")
     return model
 
 
@@ -183,17 +191,35 @@ def _checkpoint_has_trainer_state(checkpoint):
     return "optimizer_states" in checkpoint or "lr_schedulers" in checkpoint or "loops" in checkpoint
 
 
+def _load_state_dict_non_strict(model, state_dict, checkpoint_path):
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    if missing_keys or unexpected_keys:
+        print(f"Checkpoint loaded with non-strict matching from: {checkpoint_path}")
+        if missing_keys:
+            print(f"  Missing keys: {missing_keys}")
+        if unexpected_keys:
+            print(f"  Unexpected keys: {unexpected_keys}")
+    return missing_keys, unexpected_keys
+
+
 def _prepare_resume_checkpoint(model, checkpoint_path):
     if not checkpoint_path:
         return None
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    if _checkpoint_has_trainer_state(checkpoint):
-        print(f"Resuming full training state from: {checkpoint_path}")
-        return checkpoint_path
-
     state_dict = checkpoint["state_dict"] if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint
-    model.load_state_dict(state_dict)
+
+    if _checkpoint_has_trainer_state(checkpoint):
+        missing_keys, unexpected_keys = _load_state_dict_non_strict(model, state_dict, checkpoint_path)
+        if not missing_keys and not unexpected_keys:
+            print(f"Resuming full training state from: {checkpoint_path}")
+            return checkpoint_path
+
+        print("Checkpoint contains trainer state, but the model architecture does not match exactly.")
+        print("Falling back to warm-starting weights only from epoch 0.")
+        return None
+
+    _load_state_dict_non_strict(model, state_dict, checkpoint_path)
     print(f"Loaded model weights from: {checkpoint_path}")
     print("Optimizer and scheduler state were not found, so training will warm-start from epoch 0.")
     return None
@@ -256,8 +282,11 @@ def _export_best_validation_artifacts(
         for batch in loader:
             images = batch["image"].to(device)
             labels = batch["label"].to(device)
+            embeddings = batch.get("embedding")
+            if embeddings is not None:
+                embeddings = embeddings.to(device)
 
-            logits = model(images)
+            logits = model(images, embeddings=embeddings)
             loss = F.cross_entropy(logits, labels)
             probs = torch.softmax(logits, dim=1)
             preds = torch.argmax(probs, dim=1)
@@ -389,6 +418,7 @@ def run_training(args):
         num_classes=num_classes,
         lr=args.lr,
         save_dir=str(log_dir),
+        freeze_backbone=args.freeze_resnet,
         warmup_epochs=args.warmup_epochs,
     )
     model.image_dir = args.image_dir

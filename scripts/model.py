@@ -34,43 +34,49 @@ class LULC_Model(nn.Module):
             nn.Dropout(0.5),
             nn.Linear(256, num_classes),
         )
+        self.aef_lambda = torch.nn.Parameter(torch.tensor(0.0), requires_grad=True)
+        self.aef_head = torch.nn.Linear(64, num_classes)
+        nn.init.zeros_(self.aef_head.weight)
+        nn.init.zeros_(self.aef_head.bias)
 
-    def forward(self, xb):
-        return self.network(xb)
+    def forward(self, xb, embeddings=None):
+        image_logits = self.network(xb)
+
+        if embeddings is None:
+            return image_logits
+
+        embeddings = embeddings.float()
+        if embeddings.ndim > 2:
+            embeddings = embeddings.flatten(start_dim=1)
+        aef_logits = self.aef_head(embeddings)
+        return image_logits + self.aef_lambda * aef_logits
 
     def freeze(self):
-        for param in self.network.parameters():
-            param.requires_grad = False
-        for param in self.network.fc.parameters():
-            param.requires_grad = True
+        self.network.requires_grad_(False)
+        self.aef_head.requires_grad_(True)
+        self.aef_lambda.requires_grad = True
         self.backbone_frozen = True
-        self._set_frozen_batchnorm_eval()
+        self.network.eval()
 
     def unfreeze(self):
-        for param in self.network.parameters():
-            param.requires_grad = True
+        self.network.requires_grad_(True)
         self.backbone_frozen = False
+        if self.training:
+            self.network.train()
 
     def train(self, mode=True):
         super().train(mode)
         if mode and self.backbone_frozen:
-            self._set_frozen_batchnorm_eval()
+            self.network.eval()
         return self
-
-    def _set_frozen_batchnorm_eval(self):
-        for module in self.network.modules():
-            if isinstance(module, nn.modules.batchnorm._BatchNorm):
-                module.eval()
-                for param in module.parameters():
-                    param.requires_grad = False
 
 
 class LitClassifier(LightningModule):
-    def __init__(self, num_classes=8, lr=1e-3, freeze_backbone=False, warmup_epochs=0):
+    def __init__(self, num_classes=8, lr=1e-3, freeze_resnet=False, warmup_epochs=0):
         super().__init__()
         self.save_hyperparameters()
         self.model = LULC_Model(num_classes=num_classes)
-        if freeze_backbone:
+        if freeze_resnet:
             self.model.freeze()
         self.criterion = nn.CrossEntropyLoss()
         self.lr = lr
@@ -79,12 +85,13 @@ class LitClassifier(LightningModule):
         self.val_outputs = []
         self.warmup_epochs = warmup_epochs
 
-    def forward(self, x):
-        return self.model(x)
+    def forward(self, x, embeddings=None):
+        return self.model(x, embeddings=embeddings)
 
     def training_step(self, batch, batch_idx):
         x, y = batch["image"], batch["label"]
-        logits = self(x)
+        embedding = batch.get("embedding")
+        logits = self(x, embeddings=embedding)
         loss = self.criterion(logits, y)
         acc = (logits.argmax(dim=1) == y).float().mean()
         self.log("train_loss", loss, batch_size=x.size(0))
@@ -93,7 +100,8 @@ class LitClassifier(LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch["image"], batch["label"]
-        logits = self(x)
+        embedding = batch.get("embedding")
+        logits = self(x, embeddings=embedding)
         loss = self.criterion(logits, y)
         acc = (logits.argmax(dim=1) == y).float().mean()
         self.log("val_acc", acc, prog_bar=True, batch_size=x.size(0))
@@ -103,7 +111,8 @@ class LitClassifier(LightningModule):
     
     def test_step(self, batch, batch_idx):
         x, y = batch["image"], batch["label"]
-        logits = self(x)
+        embedding = batch.get("embedding")
+        logits = self(x, embeddings=embedding)
         loss = self.criterion(logits, y)
         preds = torch.argmax(logits, dim=1)
         acc = (preds == y).float().mean()
@@ -198,7 +207,8 @@ class LitClassifier(LightningModule):
         self.val_outputs.clear()
 
     def configure_optimizers(self):
-        optimizer = optim.Lamb(self.parameters(), lr=self.lr, weight_decay=1e-4)
+        trainable_params = [param for param in self.parameters() if param.requires_grad]
+        optimizer = optim.Lamb(trainable_params, lr=self.lr, weight_decay=1e-4)
 
         warmup_epochs = self.warmup_epochs
         if warmup_epochs == 0:
@@ -233,8 +243,10 @@ def get_model(num_classes, lr=1e-3, save_dir=None, freeze_backbone=False, warmup
     model = LitClassifier(
         num_classes=num_classes,
         lr=lr,
-        freeze_backbone=freeze_backbone,
+        freeze_resnet=freeze_backbone,
         warmup_epochs=warmup_epochs,
     )
     model.save_dir = save_dir
     return model
+
+

@@ -6,6 +6,7 @@ from pathlib import Path
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 
 import cv2
+import h5py
 import numpy as np
 import pandas as pd
 import rasterio
@@ -145,6 +146,7 @@ class LucasDataset(Dataset):
         self,
         image_dir,
         label_csv,
+        embeddings_path=None,
         patch_meters=384,
         output_size=(224, 224),
         transform=None,
@@ -170,6 +172,25 @@ class LucasDataset(Dataset):
         self.transform = transform or val_transform(output_size)
         self.requested_imagery_type = imagery_type
         self.verbose = verbose
+        self.embeddings_path = str(embeddings_path) if embeddings_path is not None else None
+        self._embeddings_file = None
+        self._embeddings_dataset = None
+        self._embedding_dataset_key = None
+        self.point_id_to_index = {}
+
+        if self.embeddings_path is not None:
+            with h5py.File(self.embeddings_path, "r") as hdf:
+                self.point_ids = hdf["ids"][:]
+                if "values" in hdf:
+                    self._embedding_dataset_key = "values"
+                elif "valus" in hdf:
+                    self._embedding_dataset_key = "valus"
+                else:
+                    raise KeyError(f"Could not find embedding dataset in {self.embeddings_path}. Expected 'values'.")
+
+            self.point_id_to_index = {
+                self._normalize_id(point_id): index for index, point_id in enumerate(self.point_ids)
+            }
 
         df = self._load_csv(label_csv, csv_dtypes or DEFAULT_CSV_DTYPES)
         id_column, class_column = self._resolve_csv_columns(df)
@@ -216,11 +237,21 @@ class LucasDataset(Dataset):
                 img = np.zeros((self.output_size[1], self.output_size[0], 3), dtype=np.float32)
 
         img = self.transform(img)
-        return {
+        sample = {
             "image": img,
             "label": label,
             "image_id": lucas_id,
         }
+        if self.embeddings_path is not None:
+            sample["embedding"] = self._load_embedding(lucas_id)
+        return sample
+
+    def __del__(self):
+        try:
+            if self._embeddings_file is not None:
+                self._embeddings_file.close()
+        except Exception:
+            pass
 
     def _log_read_failure(self, path, rasterio_exc, opencv_exc):
         read_failures = int(getattr(self, "_read_failures", 0)) + 1
@@ -252,6 +283,22 @@ class LucasDataset(Dataset):
     def _log(self, message):
         if bool(getattr(self, "verbose", True)):
             print(message)
+
+    def _get_embeddings_dataset(self):
+        if self.embeddings_path is None:
+            raise RuntimeError("Embeddings were not configured for this dataset.")
+        if self._embeddings_dataset is None:
+            self._embeddings_file = h5py.File(self.embeddings_path, "r")
+            self._embeddings_dataset = self._embeddings_file[self._embedding_dataset_key]
+        return self._embeddings_dataset
+
+    def _load_embedding(self, lucas_id):
+        normalized_id = self._normalize_id(lucas_id)
+        if normalized_id not in self.point_id_to_index:
+            raise KeyError(f"Missing embedding for lucas_id={normalized_id}")
+
+        embedding = self._get_embeddings_dataset()[self.point_id_to_index[normalized_id]]
+        return np.asarray(embedding, dtype=np.float32).reshape(-1)
 
     def _resolve_csv_columns(self, df):
         if "IDPOINT" in df.columns and "STR25" in df.columns:
@@ -360,6 +407,8 @@ class LucasDataset(Dataset):
 
                 lucas_id = self._extract_lucas_id(filename)
                 if lucas_id and lucas_id in self.id_to_label:
+                    if self.embeddings_path is not None and lucas_id not in self.point_id_to_index:
+                        continue
                     full_path = os.path.join(root, filename)
                     image_files.append((full_path, lucas_id))
         return image_files
